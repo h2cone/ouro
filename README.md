@@ -7,7 +7,7 @@ Minimal Rust agent example built around the OpenAI Responses API.
 - Single-file agent implementation in `examples/agent/main.rs`
 - Minimal dependencies with `serde_json` and `ureq`
 - Built-in local tools for shell execution plus file reads and writes
-- Test coverage for tool execution, response handling, and iteration limits
+- Test coverage for tool execution, response handling, and semantic stop conditions
 
 ## Getting Started
 
@@ -20,13 +20,17 @@ Minimal Rust agent example built around the OpenAI Responses API.
 
 ```powershell
 $env:OPENAI_API_KEY="your-api-key"
-cargo run --example agent -- "Summarize the current directory"
+cargo run --example agent -- "gpt-5.4" "hello"
 ```
 
 Optional environment variables:
 
 - `OPENAI_BASE_URL` to point at a compatible API base URL
-- `OPENAI_MODEL` to override the default model (`gpt-5.4`)
+
+Command-line arguments:
+
+- First positional argument is required `model`
+- Remaining positional arguments are required `task`
 
 The crate root binary prints a reminder for the example entrypoint:
 

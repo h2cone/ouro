@@ -44,9 +44,8 @@ fn agent_returns_message_without_tool_calls() {
     let agent = Agent::new(
         transport,
         ToolExecutor::new(test_temp_dir("no-tools")),
-        DEFAULT_MODEL.to_string(),
+        "gpt-5.4".to_string(),
         DEFAULT_INSTRUCTIONS.to_string(),
-        DEFAULT_MAX_ITERATIONS,
     );
 
     let result = agent.run("say hi").unwrap();
@@ -79,9 +78,8 @@ fn agent_executes_tool_calls_and_feeds_outputs_back() {
     let agent = Agent::new(
         transport,
         ToolExecutor::new(temp_dir.clone()),
-        DEFAULT_MODEL.to_string(),
+        "gpt-5.4".to_string(),
         DEFAULT_INSTRUCTIONS.to_string(),
-        DEFAULT_MAX_ITERATIONS,
     );
 
     let result = agent.run("create a file").unwrap();
@@ -94,7 +92,7 @@ fn agent_executes_tool_calls_and_feeds_outputs_back() {
 
     let requests = agent.transport.requests();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0]["model"], DEFAULT_MODEL);
+    assert_eq!(requests[0]["model"], "gpt-5.4");
     assert_eq!(
         requests[0]["input"][0]["content"][0]["text"],
         "create a file"
@@ -134,9 +132,8 @@ fn agent_surfaces_unknown_tool_errors_to_the_model() {
     let agent = Agent::new(
         transport,
         ToolExecutor::new(test_temp_dir("unknown-tool")),
-        DEFAULT_MODEL.to_string(),
+        "gpt-5.4".to_string(),
         DEFAULT_INSTRUCTIONS.to_string(),
-        DEFAULT_MAX_ITERATIONS,
     );
 
     let result = agent.run("try an invalid tool").unwrap();
@@ -165,9 +162,8 @@ fn agent_rejects_invalid_tool_arguments() {
     let agent = Agent::new(
         transport,
         ToolExecutor::new(test_temp_dir("bad-args")),
-        DEFAULT_MODEL.to_string(),
+        "gpt-5.4".to_string(),
         DEFAULT_INSTRUCTIONS.to_string(),
-        DEFAULT_MAX_ITERATIONS,
     );
 
     let error = agent.run("bad args").unwrap_err().to_string();
@@ -176,27 +172,38 @@ fn agent_rejects_invalid_tool_arguments() {
 }
 
 #[test]
-fn agent_stops_after_max_iterations() {
-    let transport = FakeTransport::new(vec![json!({
-        "id": "resp_1",
-        "output": [{
-            "type": "function_call",
-            "name": "read_file",
-            "call_id": "call_1",
-            "arguments": "{\"path\":\"missing.txt\"}"
-        }]
-    })]);
+fn agent_stops_when_tool_calls_repeat_without_progress() {
+    let transport = FakeTransport::new(vec![
+        json!({
+            "id": "resp_1",
+            "output": [{
+                "type": "function_call",
+                "name": "read_file",
+                "call_id": "call_1",
+                "arguments": "{\"path\":\"missing.txt\"}"
+            }]
+        }),
+        json!({
+            "id": "resp_2",
+            "output": [{
+                "type": "function_call",
+                "name": "read_file",
+                "call_id": "call_2",
+                "arguments": "{\"path\":\"missing.txt\"}"
+            }]
+        }),
+    ]);
     let agent = Agent::new(
         transport,
-        ToolExecutor::new(test_temp_dir("max-iters")),
-        DEFAULT_MODEL.to_string(),
+        ToolExecutor::new(test_temp_dir("semantic-stop")),
+        "gpt-5.4".to_string(),
         DEFAULT_INSTRUCTIONS.to_string(),
-        1,
     );
 
     let error = agent.run("loop forever").unwrap_err().to_string();
 
-    assert!(error.contains("Max iterations reached"));
+    assert!(error.contains("semantic stop condition"));
+    assert_eq!(agent.transport.requests().len(), 2);
 }
 
 #[test]
@@ -251,6 +258,40 @@ fn collect_output_text_joins_multiple_chunks() {
     }));
 
     assert_eq!(text, "first\nsecond");
+}
+
+#[test]
+fn parse_cli_rejects_missing_task() {
+    let error = parse_cli(vec!["gpt-4.1-mini".to_string()])
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("missing required positional argument: task"));
+}
+
+#[test]
+fn parse_cli_uses_remaining_arguments_as_task() {
+    let cli = parse_cli(vec![
+        "gpt-4.1-mini".to_string(),
+        "say".to_string(),
+        "hi".to_string(),
+    ])
+    .unwrap();
+
+    assert_eq!(
+        cli,
+        CliArgs {
+            task: "say hi".to_string(),
+            model: "gpt-4.1-mini".to_string(),
+        }
+    );
+}
+
+#[test]
+fn parse_cli_rejects_missing_model() {
+    let error = parse_cli(Vec::<String>::new()).unwrap_err().to_string();
+
+    assert!(error.contains("missing required positional argument: model"));
 }
 
 fn test_temp_dir(label: &str) -> PathBuf {

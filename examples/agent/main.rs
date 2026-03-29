@@ -6,36 +6,33 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const DEFAULT_MODEL: &str = "gpt-5.4";
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_INSTRUCTIONS: &str = "You are a helpful assistant. Be concise.";
-const DEFAULT_MAX_ITERATIONS: usize = 5;
 
 type AgentResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CliArgs {
+    pub(crate) task: String,
+    pub(crate) model: String,
+}
+
 fn main() -> AgentResult<()> {
-    let task = env::args().skip(1).collect::<Vec<_>>().join(" ");
-    let task = if task.is_empty() {
-        "Hello".to_string()
-    } else {
-        task
-    };
+    let cli = parse_cli(env::args().skip(1))?;
 
     let api_key = env::var("OPENAI_API_KEY")
         .map_err(|_| AgentError("OPENAI_API_KEY is not set".to_string()))?;
     let base_url = env::var("OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-    let model = env::var("OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
 
     let transport = HttpTransport::new(base_url, api_key);
     let agent = Agent::new(
         transport,
         ToolExecutor::new(env::current_dir()?),
-        model,
+        cli.model,
         DEFAULT_INSTRUCTIONS.to_string(),
-        DEFAULT_MAX_ITERATIONS,
     );
 
-    println!("{}", agent.run(&task)?);
+    println!("{}", agent.run(&cli.task)?);
     Ok(())
 }
 
@@ -49,6 +46,29 @@ impl Display for AgentError {
 }
 
 impl Error for AgentError {}
+
+pub(crate) fn parse_cli<I>(args: I) -> AgentResult<CliArgs>
+where
+    I: IntoIterator<Item = String>,
+{
+    let args: Vec<String> = args.into_iter().collect();
+
+    if args.is_empty() {
+        return Err(Box::new(AgentError(
+            "missing required positional argument: model".to_string(),
+        )));
+    }
+    if args.len() == 1 {
+        return Err(Box::new(AgentError(
+            "missing required positional argument: task".to_string(),
+        )));
+    }
+
+    let model = args[0].clone();
+    let task = args[1..].join(" ");
+
+    Ok(CliArgs { task, model })
+}
 
 trait ResponseTransport {
     fn create_response(&self, request: &Value) -> AgentResult<Value>;
@@ -88,23 +108,15 @@ struct Agent<T: ResponseTransport> {
     tools: ToolExecutor,
     model: String,
     instructions: String,
-    max_iterations: usize,
 }
 
 impl<T: ResponseTransport> Agent<T> {
-    fn new(
-        transport: T,
-        tools: ToolExecutor,
-        model: String,
-        instructions: String,
-        max_iterations: usize,
-    ) -> Self {
+    fn new(transport: T, tools: ToolExecutor, model: String, instructions: String) -> Self {
         Self {
             transport,
             tools,
             model,
             instructions,
-            max_iterations,
         }
     }
 
@@ -114,8 +126,9 @@ impl<T: ResponseTransport> Agent<T> {
             "content": [{"type": "input_text", "text": user_message}],
         }]);
         let mut previous_response_id = None;
+        let mut last_step = None;
 
-        for _ in 0..self.max_iterations {
+        loop {
             let request = self.build_request(previous_response_id.as_deref(), follow_up_input);
             let response = self.transport.create_response(&request)?;
             let tool_calls = extract_tool_calls(&response)?;
@@ -132,24 +145,29 @@ impl<T: ResponseTransport> Agent<T> {
 
             previous_response_id = Some(response_id(&response)?);
             let mut outputs = Vec::with_capacity(tool_calls.len());
+            let mut current_step = StepFingerprint::with_capacity(tool_calls.len());
             for call in tool_calls {
                 let result = match self.tools.execute(&call.name, &call.arguments) {
                     Ok(output) => output,
                     Err(error) => format!("Error: {error}"),
                 };
+                current_step.push(&call, &result);
                 outputs.push(json!({
                     "type": "function_call_output",
                     "call_id": call.call_id,
                     "output": result,
                 }));
             }
+
+            if last_step.as_ref() == Some(&current_step) {
+                return Err(Box::new(AgentError(
+                    "semantic stop condition triggered: repeated identical tool calls produced identical outputs".to_string(),
+                )));
+            }
+
+            last_step = Some(current_step);
             follow_up_input = Value::Array(outputs);
         }
-
-        Err(Box::new(AgentError(format!(
-            "Max iterations reached ({})",
-            self.max_iterations
-        ))))
     }
 
     fn build_request(&self, previous_response_id: Option<&str>, input: Value) -> Value {
@@ -173,6 +191,34 @@ struct ToolCall {
     name: String,
     call_id: String,
     arguments: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolCallOutcome {
+    name: String,
+    arguments: Value,
+    output: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StepFingerprint {
+    outcomes: Vec<ToolCallOutcome>,
+}
+
+impl StepFingerprint {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            outcomes: Vec::with_capacity(capacity),
+        }
+    }
+
+    fn push(&mut self, call: &ToolCall, output: &str) {
+        self.outcomes.push(ToolCallOutcome {
+            name: call.name.clone(),
+            arguments: call.arguments.clone(),
+            output: output.to_string(),
+        });
+    }
 }
 
 fn extract_tool_calls(response: &Value) -> AgentResult<Vec<ToolCall>> {
